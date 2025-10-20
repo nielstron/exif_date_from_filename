@@ -8,7 +8,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import List
 
-from PIL import Image
 import piexif
 import fire
 from tqdm import tqdm
@@ -105,22 +104,16 @@ def update_exif_date(parsers: List[Parser], image_path: Path, dry_run: bool = Fa
     if dry_run:
         _LOGGER.info(f"Would update EXIF date for {image_path} to {date_taken}")
         return False
-    # Open the image
     try:
-        img = Image.open(image_path)
-    except Exception as e:
-        _LOGGER.debug(f"Error opening {image_path}: {str(e)}")
-        if "cannot identify image file" in str(e):
-            _LOGGER.debug(f"Skipping non-image file: {image_path}")
-        else:
-            _LOGGER.warning(f"Error opening {image_path}: {str(e)}")
-        return False
-    try:
+        # Read the entire image file into memory as raw bytes.
+        with open(image_path, 'rb') as f:
+            image_data = f.read()
 
-        # Check if EXIF data exists
-        if "exif" in img.info:
-            exif_dict = piexif.load(img.info["exif"])
-        else:
+        # Load the EXIF data from the in-memory bytes.
+        try:
+            exif_dict = piexif.load(image_data)
+        except piexif.InvalidImageDataError:
+            _LOGGER.debug(f"No existing EXIF data in {image_path}. Creating new EXIF data.")
             exif_dict = {"0th": {}, "1st": {}, "Exif": {}, "GPS": {}, "Interop": {}}
 
         # Check if DateTimeOriginal tag is already set
@@ -128,7 +121,7 @@ def update_exif_date(parsers: List[Parser], image_path: Path, dry_run: bool = Fa
         if piexif.ExifIFD.DateTimeOriginal not in exif_dict["Exif"] or (
            exif_dict["Exif"].get(PROCESSED_TAG_INDEX, b"").decode("ascii").startswith(PROCESSED_TAG_NON_VARIABLE) and update
         ) or force:
-            _LOGGER.debug(f"Writing EXIF date")
+            _LOGGER.debug(f"Writing EXIF date for {image_path}")
 
             # Set the DateTimeOriginal tag
             date_taken_fmt = date_taken.strftime("%Y:%m:%d %H:%M:%S")
@@ -140,13 +133,14 @@ def update_exif_date(parsers: List[Parser], image_path: Path, dry_run: bool = Fa
 
             # Save the updated EXIF data (atomic, to avoid corrupting the image)
             exif_bytes = piexif.dump(exif_dict)
+            # Write the new data to a temp file (to ensure atomicity)
             with tempfile.NamedTemporaryFile(
                 delete=False, suffix=image_path.suffix, dir=image_path.parent
             ) as tmp:
-                img.save(tmp.name, exif=exif_bytes)
+                # Create the new image file data by inserting the new EXIF into the original data
+                piexif.insert(exif_bytes, image_data, tmp.name)
             
-            # Close the image before replacing the file
-            img.close()
+            # Atomically replace the original file with the new one.
             
             # On Windows, file handles might not be released immediately
             # Try multiple times with increasing delays
